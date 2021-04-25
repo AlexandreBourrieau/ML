@@ -1,0 +1,257 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "name": "Untitled17.ipynb",
+      "provenance": [],
+      "authorship_tag": "ABX9TyP6MBPnCWA7kegIii/QgcdC",
+      "include_colab_link": true
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    }
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "view-in-github",
+        "colab_type": "text"
+      },
+      "source": [
+        "<a href=\"https://colab.research.google.com/github/AlexandreBourrieau/ML/blob/main/Wavenet2\" target=\"_parent\"><img src=\"https://colab.research.google.com/assets/colab-badge.svg\" alt=\"Open In Colab\"/></a>"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "MszGp0_3mujZ"
+      },
+      "source": [
+        "import tensorflow as tf\n",
+        "from tensorflow import keras\n",
+        "\n",
+        "from keras.layers.convolutional import Conv1D\n",
+        "from keras.utils.conv_utils import conv_output_length\n",
+        "from keras import layers"
+      ],
+      "execution_count": 22,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "SsVKVAl6nTYd"
+      },
+      "source": [
+        "# Classe CausalAtrousConvolution1D"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "mB6GLD7XoZ6_"
+      },
+      "source": [
+        "def asymmetric_temporal_padding(x, left_pad=1, right_pad=1):\n",
+        "  '''Pad the middle dimension of a 3D tensor\n",
+        "  with \"left_pad\" zeros left and \"right_pad\" right.\n",
+        "  '''\n",
+        "  pattern = [[0, 0], [left_pad, right_pad], [0, 0]]\n",
+        "  return tf.pad(x, pattern)"
+      ],
+      "execution_count": 23,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "ssncRTcwnZMK"
+      },
+      "source": [
+        "class CausalAtrousConvolution1D(Conv1D):\n",
+        "  def __init__(self, filters, kernel_size, init='glorot_uniform', activation=None, padding='valid', strides=1, dilation_rate=1,\n",
+        "               bias_regularizer=None, activity_regularizer=None, kernel_constraint=None, bias_constraint=None, use_bias=True, causal=False, **kwargs):\n",
+        "    super(CausalAtrousConvolution1D, self).__init__(filters,\n",
+        "                                                    kernel_size=kernel_size,\n",
+        "                                                    strides=strides,\n",
+        "                                                    padding=padding,\n",
+        "                                                    dilation_rate=dilation_rate,\n",
+        "                                                    activation=activation,\n",
+        "                                                    use_bias=use_bias,\n",
+        "                                                    kernel_initializer=init,\n",
+        "                                                    activity_regularizer=activity_regularizer,\n",
+        "                                                    bias_regularizer=bias_regularizer,\n",
+        "                                                    kernel_constraint=kernel_constraint,\n",
+        "                                                    bias_constraint=bias_constraint,\n",
+        "                                                    **kwargs)\n",
+        "    self.causal = causal\n",
+        "    if self.causal and padding != 'valid':\n",
+        "      raise ValueError(\"Causal mode dictates border_mode=valid.\")\n",
+        "    \n",
+        "    def compute_output_shape(self, input_shape):\n",
+        "      input_length = input_shape[1]\n",
+        "      if self.causal:\n",
+        "        input_length += self.dilation_rate[0] * (self.kernel_size[0] - 1)\n",
+        "        length = conv_output_length(input_length,self.kernel_size[0],self.padding,self.strides[0],dilation=self.dilation_rate[0])\n",
+        "        return (input_shape[0], length, self.filters)\n",
+        "\n",
+        "    def call(self, x):\n",
+        "      if self.causal:\n",
+        "        x = asymmetric_temporal_padding(x, self.dilation_rate[0] * (self.kernel_size[0] - 1), 0)\n",
+        "      return super(CausalAtrousConvolution1D, self).call(x)\n"
+      ],
+      "execution_count": 24,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "UrUydqeNnXcX"
+      },
+      "source": [
+        "# Wavenet Model"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "jiKkhjzCk6vc"
+      },
+      "source": [
+        "def build_model(fragment_length, nb_filters, nb_output_bins, dilation_depth, nb_stacks, use_skip_connections,learn_all_outputs, desired_sample_rate, use_bias, res_l2, final_l2):\n",
+        "  def residual_block(x):\n",
+        "    original_x = x\n",
+        "    tanh_out = CausalAtrousConvolution1D(nb_filters, 2, dilation_rate=2 ** i, padding='valid', causal=True,\n",
+        "                                         use_bias=use_bias, name='dilated_conv_%d_tanh_s%d' % (2 ** i, s), activation='tanh',\n",
+        "                                         kernel_regularizer=tf.keras.regularizers.l2(res_l2))(x)\n",
+        "    sigm_out = CausalAtrousConvolution1D(nb_filters, 2, dilation_rate=2 ** i, padding='valid', causal=True,\n",
+        "                                         use_bias=use_bias,\n",
+        "                                         name='dilated_conv_%d_sigm_s%d' % (2 ** i, s), activation='sigmoid',\n",
+        "                                         kernel_regularizer=tf.keras.regularizers.l2(res_l2))(x)\n",
+        "    x = layers.Multiply(name='gated_activation_%d_s%d' % (i, s))([tanh_out, sigm_out])\n",
+        "\n",
+        "    res_x = layers.Convolution1D(nb_filters, 1, padding='same', use_bias=use_bias, kernel_regularizer=tf.keras.regularizers.l2(res_l2))(x)\n",
+        "    skip_x = layers.Convolution1D(nb_filters, 1, padding='same', use_bias=use_bias, kernel_regularizer=tf.keras.regularizers.l2(res_l2))(x)\n",
+        "    res_x = layers.Add()([original_x, res_x])\n",
+        "    return res_x, skip_x\n",
+        "  \n",
+        "  input = tf.keras.layers.Input(shape=(fragment_length, nb_output_bins), name='input_part')\n",
+        "  out = input\n",
+        "  skip_connections = []\n",
+        "  out = CausalAtrousConvolution1D(nb_filters,2,dilation_rate=1,padding='valid',causal=True,name='initial_causal_conv')(out)\n",
+        "  \n",
+        "  for s in range(nb_stacks):\n",
+        "    for i in range(0, dilation_depth + 1):\n",
+        "      out, skip_out = residual_block(out)\n",
+        "      skip_connections.append(skip_out)\n",
+        "    \n",
+        "    if use_skip_connections:\n",
+        "      out = layers.Add()(skip_connections)\n",
+        "    \n",
+        "    out = layers.Activation('relu')(out)\n",
+        "    out = layers.Convolution1D(nb_output_bins, 1, padding='same',kernel_regularizer=tf.keras.kernel_regularizer.l2(final_l2))(out)\n",
+        "    out = layers.Activation('relu')(out)\n",
+        "    out = layers.Convolution1D(nb_output_bins, 1, padding='same')(out)\n",
+        "\n",
+        "    if not learn_all_outputs:\n",
+        "        raise DeprecationWarning('Learning on just all outputs is wasteful, now learning only inside receptive field.')\n",
+        "        out = layers.Lambda(lambda x: x[:, -1, :], output_shape=(out._keras_shape[-1],))(out)\n",
+        "\n",
+        "    out = layers.Activation('softmax', name=\"output_softmax\")(out)\n",
+        "    model = Model(input, out)\n",
+        "\n",
+        "    receptive_field, receptive_field_ms = compute_receptive_field()\n",
+        "    return model"
+      ],
+      "execution_count": 25,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "XNoo0D3iscrd"
+      },
+      "source": [
+        "# Use the model"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "LBL6qP3qxMer"
+      },
+      "source": [
+        "def compute_receptive_field_(dilation_depth, nb_stacks):\n",
+        "    receptive_field = nb_stacks * (2 ** dilation_depth * 2) - (nb_stacks - 1)\n",
+        "    return receptive_field"
+      ],
+      "execution_count": 28,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "_HqR0Vjhsljt"
+      },
+      "source": [
+        "nb_filters = 256\n",
+        "nb_output_bins = 1\n",
+        "dilation_depth = 8\n",
+        "nb_stacks = 1\n",
+        "use_skip_connections = True\n",
+        "learn_all_outputs = True\n",
+        "use_bias = False\n",
+        "res_l2 = 0\n",
+        "final_l2 = 0\n",
+        "\n",
+        "fragment_length = compute_receptive_field_(dilation_depth, nb_stacks)"
+      ],
+      "execution_count": 47,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 312
+        },
+        "id": "IZR1wGOTsfsU",
+        "outputId": "03bd745c-d87c-48b9-9179-911bed6b7e9f"
+      },
+      "source": [
+        "model = build_model(1024, nb_filters, nb_output_bins, dilation_depth, nb_stacks, use_skip_connections,learn_all_outputs, desired_sample_rate, use_bias, res_l2, final_l2)"
+      ],
+      "execution_count": 48,
+      "outputs": [
+        {
+          "output_type": "error",
+          "ename": "ValueError",
+          "evalue": "ignored",
+          "traceback": [
+            "\u001b[0;31m---------------------------------------------------------------------------\u001b[0m",
+            "\u001b[0;31mValueError\u001b[0m                                Traceback (most recent call last)",
+            "\u001b[0;32m<ipython-input-48-eccc5ac9cf33>\u001b[0m in \u001b[0;36m<module>\u001b[0;34m()\u001b[0m\n\u001b[0;32m----> 1\u001b[0;31m \u001b[0mmodel\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mbuild_model\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;36m1024\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mnb_filters\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mnb_output_bins\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mdilation_depth\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mnb_stacks\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0muse_skip_connections\u001b[0m\u001b[0;34m,\u001b[0m\u001b[0mlearn_all_outputs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mdesired_sample_rate\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0muse_bias\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mres_l2\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mfinal_l2\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m",
+            "\u001b[0;32m<ipython-input-25-6cdd2373fcf6>\u001b[0m in \u001b[0;36mbuild_model\u001b[0;34m(fragment_length, nb_filters, nb_output_bins, dilation_depth, nb_stacks, use_skip_connections, learn_all_outputs, desired_sample_rate, use_bias, res_l2, final_l2)\u001b[0m\n\u001b[1;32m     23\u001b[0m   \u001b[0;32mfor\u001b[0m \u001b[0ms\u001b[0m \u001b[0;32min\u001b[0m \u001b[0mrange\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mnb_stacks\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m     24\u001b[0m     \u001b[0;32mfor\u001b[0m \u001b[0mi\u001b[0m \u001b[0;32min\u001b[0m \u001b[0mrange\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;36m0\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mdilation_depth\u001b[0m \u001b[0;34m+\u001b[0m \u001b[0;36m1\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m---> 25\u001b[0;31m       \u001b[0mout\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mskip_out\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mresidual_block\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mout\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m     26\u001b[0m       \u001b[0mskip_connections\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mappend\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mskip_out\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m     27\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n",
+            "\u001b[0;32m<ipython-input-25-6cdd2373fcf6>\u001b[0m in \u001b[0;36mresidual_block\u001b[0;34m(x)\u001b[0m\n\u001b[1;32m     13\u001b[0m     \u001b[0mres_x\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mlayers\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mConvolution1D\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mnb_filters\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0;36m1\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mpadding\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0;34m'same'\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0muse_bias\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0muse_bias\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mkernel_regularizer\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0mtf\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mkeras\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mregularizers\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0ml2\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mres_l2\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mx\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m     14\u001b[0m     \u001b[0mskip_x\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mlayers\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mConvolution1D\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mnb_filters\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0;36m1\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mpadding\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0;34m'same'\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0muse_bias\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0muse_bias\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mkernel_regularizer\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0mtf\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mkeras\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mregularizers\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0ml2\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mres_l2\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mx\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m---> 15\u001b[0;31m     \u001b[0mres_x\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mlayers\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mAdd\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;34m[\u001b[0m\u001b[0moriginal_x\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mres_x\u001b[0m\u001b[0;34m]\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m     16\u001b[0m     \u001b[0;32mreturn\u001b[0m \u001b[0mres_x\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mskip_x\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m     17\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n",
+            "\u001b[0;32m/usr/local/lib/python3.7/dist-packages/tensorflow/python/keras/engine/base_layer.py\u001b[0m in \u001b[0;36m__call__\u001b[0;34m(self, *args, **kwargs)\u001b[0m\n\u001b[1;32m    950\u001b[0m     \u001b[0;32mif\u001b[0m \u001b[0m_in_functional_construction_mode\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mself\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0minputs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0margs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mkwargs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0minput_list\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    951\u001b[0m       return self._functional_construction_call(inputs, args, kwargs,\n\u001b[0;32m--> 952\u001b[0;31m                                                 input_list)\n\u001b[0m\u001b[1;32m    953\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    954\u001b[0m     \u001b[0;31m# Maintains info about the `Layer.call` stack.\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+            "\u001b[0;32m/usr/local/lib/python3.7/dist-packages/tensorflow/python/keras/engine/base_layer.py\u001b[0m in \u001b[0;36m_functional_construction_call\u001b[0;34m(self, inputs, args, kwargs, input_list)\u001b[0m\n\u001b[1;32m   1089\u001b[0m         \u001b[0;31m# Check input assumptions set after layer building, e.g. input shape.\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m   1090\u001b[0m         outputs = self._keras_tensor_symbolic_call(\n\u001b[0;32m-> 1091\u001b[0;31m             inputs, input_masks, args, kwargs)\n\u001b[0m\u001b[1;32m   1092\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m   1093\u001b[0m         \u001b[0;32mif\u001b[0m \u001b[0moutputs\u001b[0m \u001b[0;32mis\u001b[0m \u001b[0;32mNone\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+            "\u001b[0;32m/usr/local/lib/python3.7/dist-packages/tensorflow/python/keras/engine/base_layer.py\u001b[0m in \u001b[0;36m_keras_tensor_symbolic_call\u001b[0;34m(self, inputs, input_masks, args, kwargs)\u001b[0m\n\u001b[1;32m    820\u001b[0m       \u001b[0;32mreturn\u001b[0m \u001b[0mnest\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mmap_structure\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mkeras_tensor\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mKerasTensor\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0moutput_signature\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    821\u001b[0m     \u001b[0;32melse\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 822\u001b[0;31m       \u001b[0;32mreturn\u001b[0m \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0m_infer_output_signature\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0minputs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0margs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mkwargs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0minput_masks\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    823\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    824\u001b[0m   \u001b[0;32mdef\u001b[0m \u001b[0m_infer_output_signature\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mself\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0minputs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0margs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mkwargs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0minput_masks\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+            "\u001b[0;32m/usr/local/lib/python3.7/dist-packages/tensorflow/python/keras/engine/base_layer.py\u001b[0m in \u001b[0;36m_infer_output_signature\u001b[0;34m(self, inputs, args, kwargs, input_masks)\u001b[0m\n\u001b[1;32m    860\u001b[0m           \u001b[0;31m# overridden).\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    861\u001b[0m           \u001b[0;31m# TODO(kaftan): do we maybe_build here, or have we already done it?\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 862\u001b[0;31m           \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0m_maybe_build\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0minputs\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    863\u001b[0m           \u001b[0moutputs\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mcall_fn\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0minputs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0;34m*\u001b[0m\u001b[0margs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0;34m**\u001b[0m\u001b[0mkwargs\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    864\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n",
+            "\u001b[0;32m/usr/local/lib/python3.7/dist-packages/tensorflow/python/keras/engine/base_layer.py\u001b[0m in \u001b[0;36m_maybe_build\u001b[0;34m(self, inputs)\u001b[0m\n\u001b[1;32m   2708\u001b[0m         \u001b[0;31m# operations.\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m   2709\u001b[0m         \u001b[0;32mwith\u001b[0m \u001b[0mtf_utils\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mmaybe_init_scope\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mself\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m-> 2710\u001b[0;31m           \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mbuild\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0minput_shapes\u001b[0m\u001b[0;34m)\u001b[0m  \u001b[0;31m# pylint:disable=not-callable\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m   2711\u001b[0m       \u001b[0;31m# We must set also ensure that the layer is marked as built, and the build\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m   2712\u001b[0m       \u001b[0;31m# shape is stored since user defined build functions may not be calling\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+            "\u001b[0;32m/usr/local/lib/python3.7/dist-packages/tensorflow/python/keras/utils/tf_utils.py\u001b[0m in \u001b[0;36mwrapper\u001b[0;34m(instance, input_shape)\u001b[0m\n\u001b[1;32m    270\u001b[0m     \u001b[0;32mif\u001b[0m \u001b[0minput_shape\u001b[0m \u001b[0;32mis\u001b[0m \u001b[0;32mnot\u001b[0m \u001b[0;32mNone\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    271\u001b[0m       \u001b[0minput_shape\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mconvert_shapes\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0minput_shape\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mto_tuples\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0;32mTrue\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 272\u001b[0;31m     \u001b[0moutput_shape\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mfn\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0minstance\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0minput_shape\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    273\u001b[0m     \u001b[0;31m# Return shapes from `fn` as TensorShapes.\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    274\u001b[0m     \u001b[0;32mif\u001b[0m \u001b[0moutput_shape\u001b[0m \u001b[0;32mis\u001b[0m \u001b[0;32mnot\u001b[0m \u001b[0;32mNone\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+            "\u001b[0;32m/usr/local/lib/python3.7/dist-packages/tensorflow/python/keras/layers/merge.py\u001b[0m in \u001b[0;36mbuild\u001b[0;34m(self, input_shape)\u001b[0m\n\u001b[1;32m    110\u001b[0m       \u001b[0;32melse\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    111\u001b[0m         \u001b[0mshape\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0minput_shape\u001b[0m\u001b[0;34m[\u001b[0m\u001b[0mi\u001b[0m\u001b[0;34m]\u001b[0m\u001b[0;34m[\u001b[0m\u001b[0;36m1\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m]\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 112\u001b[0;31m       \u001b[0moutput_shape\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0m_compute_elemwise_op_output_shape\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0moutput_shape\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mshape\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    113\u001b[0m     \u001b[0;31m# If the inputs have different ranks, we have to reshape them\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    114\u001b[0m     \u001b[0;31m# to make them broadcastable.\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+            "\u001b[0;32m/usr/local/lib/python3.7/dist-packages/tensorflow/python/keras/layers/merge.py\u001b[0m in \u001b[0;36m_compute_elemwise_op_output_shape\u001b[0;34m(self, shape1, shape2)\u001b[0m\n\u001b[1;32m     83\u001b[0m           raise ValueError(\n\u001b[1;32m     84\u001b[0m               \u001b[0;34m'Operands could not be broadcast '\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m---> 85\u001b[0;31m               'together with shapes ' + str(shape1) + ' ' + str(shape2))\n\u001b[0m\u001b[1;32m     86\u001b[0m         \u001b[0moutput_shape\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mappend\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mi\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m     87\u001b[0m     \u001b[0;32mreturn\u001b[0m \u001b[0mtuple\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0moutput_shape\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+            "\u001b[0;31mValueError\u001b[0m: Operands could not be broadcast together with shapes (1023, 256) (1022, 256)"
+          ]
+        }
+      ]
+    }
+  ]
+}
